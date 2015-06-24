@@ -25,7 +25,11 @@
 
 MODULE_LICENSE("GPL");
 
-struct webos_fence_fd_into
+#define WEBOS_FENCE_IOC_MAGIC		'<'
+
+#define WEBOS_FENCE_IOC_FD		_IOW(WEBOS_FENCE_IOC_MAGIC, 0, __s32)
+
+struct webos_fence_fd_info
 {
 	int reqno;
 	int fd;
@@ -38,6 +42,7 @@ struct webos_fence
 
 	/* for process */
 	int fd;
+	struct file *file;
 };
 
 struct webos_surface
@@ -50,11 +55,7 @@ struct webos_surface
 
 struct webos_surface *surface[3];
 struct webos_fence *wfence[3];
-
 struct webos_fence *latest_fence;
-
-
-
 struct task_struct *sync_thr;
 
 static int sync_thr_func(void *arg)
@@ -86,10 +87,38 @@ static int sync_thr_func(void *arg)
 	return 0;
 }
 
+
+static int webos_fence_usync_release(struct inode *inode, struct file *file)
+{
+	struct webos_fence *wfence = file->private_data;
+
+	printk("webos_fence_usync_release:%d\n", wfence->base.seqno);
+	return 0;
+}
+
+static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
+			     unsigned long arg)
+{
+	struct webos_fence *wfence = file->private_data;
+
+	printk("webos_fence_usync_ioctl:%d\n", wfence->base.seqno);
+	/* switch (cmd) { */
+	/* default: */
+	/* 	return -ENOTTY; */
+	/* } */
+
+	return 0;
+}
+
+static const struct file_operations webos_fence_usync_fops = {
+	.release = webos_fence_usync_release,
+	.unlocked_ioctl = webos_fence_usync_ioctl,
+	.compat_ioctl = webos_fence_usync_ioctl,
+};
+
 static void webos_fence_release(struct fence *fence)
 {
-	/* fence_free(fence); /\* this free wfence *\/ */
-
+	/* BUGBUG: What do I do at here?? */
 	/* not free fence */
 	printk("release fence=%p\n", fence);
 	/* fence_free(fence); */
@@ -156,23 +185,40 @@ struct webos_surface *webos_get_buf(int i)
 }
 EXPORT_SYMBOL(webos_get_buf);
 
-static long webos_fence_ioctl(struct file *file, unsigned int cmd,
+static long buf_man_ioctl(struct file *file, unsigned int cmd,
 			      unsigned long arg)
 {
-	struct webos_fence_fd_info *info;
+	struct webos_fence_fd_info info;
 	int fd;
-	
+	struct webos_fence *wf;
+	int ret;
+
+	if (copy_from_user(&info, (void __user *)arg, sizeof(info)))
+		return -EFAULT;
+
 	switch (cmd) {
 	case WEBOS_FENCE_IOC_FD:
+		wf = wfence[info.reqno % 3];
+		wf->file = anon_inode_getfile("sync_fence",
+					      &webos_fence_usync_fops,
+					      wf, 0);
+		if (IS_ERR(wf->file))
+			return -EFAULT;
+
 		fd = get_unused_fd_flags(O_CLOEXEC);
-		
-		fd_install(fd, fence->file);
-
-
+		fd_install(fd, wf->file);
 		break;
+	default:
+		return -ENOTTY;
 	}
 
-	/* return fd of webos_fence */
+	if (copy_to_user((void __user *)arg, &info, sizeof(info))) {
+		put_unused_fd(fd);
+		ret = -EFAULT;
+	} else
+		ret = 0;
+
+	return ret;
 }
 
 static int buf_man_open(struct inode *inode, struct file *file)
@@ -192,8 +238,8 @@ static const struct file_operations buf_man_fops = {
 	.owner = THIS_MODULE,
 	.open = buf_man_open,
 	.release = buf_man_release,
-	/* .unlocked_ioctl = buf_man_ioctl, */
-	/* .compat_ioctl = buf_man_ioctl, */
+	.unlocked_ioctl = buf_man_ioctl,
+	.compat_ioctl = buf_man_ioctl,
 };
 
 static struct miscdevice buf_man_dev = {
