@@ -11,7 +11,9 @@ typedef __signed__ int __s32;
 #define WEBOS_FENCE_IOC_MAGIC		'<'
 
 #define BUF_MAN_IOC_GET_FENCE		_IOW(WEBOS_FENCE_IOC_MAGIC, 0, __s32)
-#define WEBOS_FENCE_IOC_WAIT 		_IOW(WEBOS_FENCE_IOC_MAGIC, 1, __s32)
+#define BUF_MAN_IOC_CREATE_FENCE		_IOW(WEBOS_FENCE_IOC_MAGIC, 1, __s32)
+#define WEBOS_FENCE_IOC_WAIT 		_IOW(WEBOS_FENCE_IOC_MAGIC, 2, __s32)
+
 
 
 struct webos_fence_fd_info
@@ -32,6 +34,12 @@ int main(void)
 		perror("[APP]fail to open:/dev/buf_man\n");
 		return 1;
 	}
+	ret = ioctl(buf_man_fd, BUF_MAN_IOC_CREATE_FENCE, 0);
+	if (ret < 0) {
+		perror("[APP]fail to create user-fence\n");
+		close(buf_man_fd);
+		return 1;
+	}
 
 	for (i = 0; i < 5; i++) {
 		ret = ioctl(buf_man_fd, BUF_MAN_IOC_GET_FENCE, &info);
@@ -48,10 +56,9 @@ int main(void)
 		}
 		printf("[APP] meet fence[%d]\n", info.reqno);
 
-		close(info.fd);
 	}
 	
-
+	/* BUGBUG: it should close every-fd of every-fence. */
 	close(buf_man_fd);
 	return 0;
 }

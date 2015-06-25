@@ -28,7 +28,8 @@ MODULE_LICENSE("GPL");
 #define WEBOS_FENCE_IOC_MAGIC		'<'
 
 #define BUF_MAN_IOC_GET_FENCE		_IOW(WEBOS_FENCE_IOC_MAGIC, 0, __s32)
-#define WEBOS_FENCE_IOC_WAIT 		_IOW(WEBOS_FENCE_IOC_MAGIC, 1, __s32)
+#define BUF_MAN_IOC_CREATE_FENCE		_IOW(WEBOS_FENCE_IOC_MAGIC, 1, __s32)
+#define WEBOS_FENCE_IOC_WAIT 		_IOW(WEBOS_FENCE_IOC_MAGIC, 2, __s32)
 
 struct webos_fence_fd_info
 {
@@ -95,7 +96,11 @@ static int sync_thr_func(void *arg)
 
 static int webos_fence_usync_release(struct inode *inode, struct file *file)
 {
-	printk("webos_fence_usync_release\n");
+	struct webos_fence *wf = file->private_data;
+
+	printk("webos_fence_usync_release:fd=%d fence->reqno=%d\n", wf->fd, wf->base.seqno);
+	wf->fd = -1;
+	wf->file = NULL;
 	return 0;
 }
 
@@ -108,8 +113,9 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 	case WEBOS_FENCE_IOC_WAIT:
 		/* printk("webos_fence_usync_ioctl-wait:%d %p\n", wf->base.seqno, wf); */
 		fence_wait_timeout(&wf->base, true, 10*HZ);
-		/* printk("meet fence[%d]:%p\n", wf->base.seqno, wf); */
 		webos_fence_put(wf);
+
+		/* printk("meet fence[%d]:%p\n", wf->base.seqno, wf); */
 		break;
 	default:
 		return -EINVAL;
@@ -196,31 +202,38 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 	struct webos_fence_fd_info info;
 	int fd;
 	struct webos_fence *wf;
-	int ret;
+	int ret = 0;
+	int i;
 
 	switch (cmd) {
+	case BUF_MAN_IOC_CREATE_FENCE:
+		for (i = 0; i < 3; i++) {
+			/* BUGBUG: lock? */
+			wf = wfence[i];
+			wf->file = anon_inode_getfile("sync_fence",
+						      &webos_fence_usync_fops,
+						      wf, 0);
+			if (IS_ERR(wf->file))
+				return -EFAULT;
+
+			fd = get_unused_fd_flags(O_CLOEXEC);
+			fd_install(fd, wf->file);
+			wf->fd = fd;
+
+			printk("create user-fence:fence=%p fd=%d\n", wf, wf->fd);
+		}
+		break;
 	case BUF_MAN_IOC_GET_FENCE:
 		wf = webos_fence_get();
-		wf->file = anon_inode_getfile("sync_fence",
-					      &webos_fence_usync_fops,
-					      wf, 0);
-		if (IS_ERR(wf->file))
-			return -EFAULT;
-
-		fd = get_unused_fd_flags(O_CLOEXEC);
-		fd_install(fd, wf->file);
-		info.fd = fd;
+		info.fd = wf->fd;
 		info.reqno = wf->base.seqno;
+		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
+			ret = -EFAULT;
 		break;
+
 	default:
 		return -ENOTTY;
 	}
-
-	if (copy_to_user((void __user *)arg, &info, sizeof(info))) {
-		put_unused_fd(fd);
-		ret = -EFAULT;
-	} else
-		ret = 0;
 
 	return ret;
 }
@@ -274,6 +287,7 @@ static int __init buf_man_init(void)
 			   0); /* sequence number of fence */
 
 		fence_enable_sw_signaling(&wfence[i]->base);
+
 		printk("create fence:%p context=%d id=%d flag=%lx\n",
 		       wfence[i], wfence[i]->base.context,
 		       wfence[i]->base.seqno, wfence[i]->base.flags);
