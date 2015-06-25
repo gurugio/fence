@@ -27,7 +27,8 @@ MODULE_LICENSE("GPL");
 
 #define WEBOS_FENCE_IOC_MAGIC		'<'
 
-#define WEBOS_FENCE_IOC_FD		_IOW(WEBOS_FENCE_IOC_MAGIC, 0, __s32)
+#define BUF_MAN_IOC_GET_FENCE		_IOW(WEBOS_FENCE_IOC_MAGIC, 0, __s32)
+#define WEBOS_FENCE_IOC_WAIT 		_IOW(WEBOS_FENCE_IOC_MAGIC, 1, __s32)
 
 struct webos_fence_fd_info
 {
@@ -58,6 +59,10 @@ struct webos_fence *wfence[3];
 struct webos_fence *latest_fence;
 struct task_struct *sync_thr;
 
+struct webos_fence *webos_fence_get(void);
+void webos_fence_put(struct webos_fence *);
+
+
 static int sync_thr_func(void *arg)
 {
 	int old_fence_id = -1;
@@ -75,7 +80,7 @@ static int sync_thr_func(void *arg)
 			old_fence_id = latest_fence->base.seqno;
 			printk("signal-%d\n", old_fence_id);
 		} else {
-			printk("no signal\n");
+			/* printk("no signal\n"); */
 		}
 
 		ssleep(2);
@@ -90,22 +95,25 @@ static int sync_thr_func(void *arg)
 
 static int webos_fence_usync_release(struct inode *inode, struct file *file)
 {
-	struct webos_fence *wfence = file->private_data;
-
-	printk("webos_fence_usync_release:%d\n", wfence->base.seqno);
+	printk("webos_fence_usync_release\n");
 	return 0;
 }
 
 static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
-	struct webos_fence *wfence = file->private_data;
+	struct webos_fence *wf = file->private_data;
 
-	printk("webos_fence_usync_ioctl:%d\n", wfence->base.seqno);
-	/* switch (cmd) { */
-	/* default: */
-	/* 	return -ENOTTY; */
-	/* } */
+	switch (cmd) {
+	case WEBOS_FENCE_IOC_WAIT:
+		/* printk("webos_fence_usync_ioctl-wait:%d %p\n", wf->base.seqno, wf); */
+		fence_wait_timeout(&wf->base, true, 10*HZ);
+		/* printk("meet fence[%d]:%p\n", wf->base.seqno, wf); */
+		webos_fence_put(wf);
+		break;
+	default:
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -165,9 +173,6 @@ struct webos_fence *webos_fence_get(void)
 	/* recycle fence */
 	clear_bit(FENCE_FLAG_SIGNALED_BIT, &wf->base.flags);
 	
-	/* printk("get_fence[%p]: seq=%d ref=%d\n", */
-	/*        wf, wf->base.seqno, atomic_read(&wf->base.refcount.refcount)); */
-
 	latest_fence = wf;
 	return wf;
 }
@@ -193,12 +198,9 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 	struct webos_fence *wf;
 	int ret;
 
-	if (copy_from_user(&info, (void __user *)arg, sizeof(info)))
-		return -EFAULT;
-
 	switch (cmd) {
-	case WEBOS_FENCE_IOC_FD:
-		wf = wfence[info.reqno % 3];
+	case BUF_MAN_IOC_GET_FENCE:
+		wf = webos_fence_get();
 		wf->file = anon_inode_getfile("sync_fence",
 					      &webos_fence_usync_fops,
 					      wf, 0);
@@ -207,6 +209,8 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 
 		fd = get_unused_fd_flags(O_CLOEXEC);
 		fd_install(fd, wf->file);
+		info.fd = fd;
+		info.reqno = wf->base.seqno;
 		break;
 	default:
 		return -ENOTTY;
