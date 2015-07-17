@@ -41,7 +41,40 @@ struct webos_fence
 
 static atomic_t webos_fence_index = ATOMIC_INIT(0);
 
-void webos_fence_ready(struct webos_fence *wf);
+
+void webos_fence_ready(struct webos_fence *wf)
+{
+	/*
+	 * fence_enable_sw_signaling cannot enable signal
+	 * if SIGNALED_BIT is already set.
+	 */
+	clear_bit(FENCE_FLAG_SIGNALED_BIT, &wf->base.flags);
+}
+EXPORT_SYMBOL(webos_fence_ready);
+
+void webos_fence_get(struct webos_fence *wf)
+{
+	fence_get(&wf->base);
+}
+EXPORT_SYMBOL(webos_fence_get);
+
+void webos_fence_put(struct webos_fence *wf)
+{
+	fence_put(&wf->base);
+}
+EXPORT_SYMBOL(webos_fence_put);
+
+void webos_fence_signal(struct webos_fence *wf)
+{
+	fence_signal(&wf->base);
+}
+EXPORT_SYMBOL(webos_fence_signal);
+
+void webos_fence_wait(struct webos_fence *wf, int timeout_sec)
+{
+	fence_wait_timeout(&wf->base, true, timeout_sec * HZ);
+}
+EXPORT_SYMBOL(webos_fence_wait);
 
 static int webos_fence_usync_release(struct inode *inode, struct file *file)
 {
@@ -68,14 +101,16 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 			wait_info.timeout = 10; /* default */
 
 		/* printk("webos_fence_usync_ioctl-wait:%d %p\n", wf->base.seqno, wf); */
-		fence_wait_timeout(&wf->base, true, wait_info.timeout * HZ);
+		/* fence_wait_timeout(&wf->base, true, wait_info.timeout * HZ); */
+		webos_fence_wait(wf, wait_info.timeout);
 		/* printk("meet fence:%d %p\n", wf->base.seqno, wf); */
 		break;
 	case WEBOS_FENCE_IOC_READY:
 		webos_fence_ready(wf);
 		break;
 	case WEBOS_FENCE_IOC_SIGNAL:
-		fence_signal(&wf->base);
+		/* fence_signal(&wf->base); */
+		webos_fence_signal(wf);
 		break;
 	default:
 		return -EINVAL;
@@ -124,28 +159,6 @@ static const struct fence_ops webos_fence_ops = {
 	.wait = fence_default_wait,
 	.release = webos_fence_release,
 };
-
-void webos_fence_ready(struct webos_fence *wf)
-{
-	/*
-	 * fence_enable_sw_signaling cannot enable signal
-	 * if SIGNALED_BIT is already set.
-	 */
-	clear_bit(FENCE_FLAG_SIGNALED_BIT, &wf->base.flags);
-}
-EXPORT_SYMBOL(webos_fence_ready);
-
-void webos_fence_get(struct webos_fence *wf)
-{
-	fence_get(&wf->base);
-}
-EXPORT_SYMBOL(webos_fence_get);
-
-void webos_fence_put(struct webos_fence *wf)
-{
-	fence_put(&wf->base);
-}
-EXPORT_SYMBOL(webos_fence_put);
 
 struct webos_fence *webos_create_fence(unsigned int context, unsigned int seq)
 {
