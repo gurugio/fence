@@ -23,82 +23,31 @@
 #include <linux/sizes.h>
 #include <linux/fence.h>
 
+#include "webos_fence_uapi.h"
+
 MODULE_LICENSE("GPL");
 
-#define WEBOS_FENCE_IOC_MAGIC		'<'
-
-#define BUF_MAN_IOC_GET_FENCE		_IOW(WEBOS_FENCE_IOC_MAGIC, 0, __s32)
-#define BUF_MAN_IOC_CREATE_FENCE		_IOW(WEBOS_FENCE_IOC_MAGIC, 1, __s32)
-#define WEBOS_FENCE_IOC_WAIT 		_IOW(WEBOS_FENCE_IOC_MAGIC, 2, __s32)
-
-struct webos_fence_fd_info
-{
-	int reqno;
-	int fd;
-};
 
 struct webos_fence
 {
 	struct fence base;
 	spinlock_t lock;
+	struct rcu_head rcu;
 
 	/* for process */
 	int fd;
 	struct file *file;
 };
 
-struct webos_surface
-{
-	char name[20];
-	char *buf;
-	size_t buf_size;
-};
+static atomic_t webos_fence_index = ATOMIC_INIT(0);
 
-
-struct webos_surface *surface[3];
-struct webos_fence *wfence[3];
-struct webos_fence *latest_fence;
-struct task_struct *sync_thr;
-
-struct webos_fence *webos_fence_get(void);
-void webos_fence_put(struct webos_fence *);
-
-
-static int sync_thr_func(void *arg)
-{
-	int old_fence_id = -1;
-	/* int stop=0; */
-	
-	printk("\t\tstart sync_thr\n");
-
-	/*
-	 * Simulate buffer manipulation.
-	 * At every 2-sec it sends signal that the buffer is ready.
-	 */
-	while (!kthread_should_stop()) {
-		if (latest_fence && old_fence_id != latest_fence->base.seqno) {
-			fence_signal(&latest_fence->base);
-			old_fence_id = latest_fence->base.seqno;
-			printk("signal-%d\n", old_fence_id);
-		} else {
-			/* printk("no signal\n"); */
-		}
-
-		ssleep(2);
-
-		/* if (stop++ > 10) /\* end simulation *\/ */
-		/* 	break; */
-	}
-
-	return 0;
-}
-
+void webos_fence_ready(struct webos_fence *wf);
 
 static int webos_fence_usync_release(struct inode *inode, struct file *file)
 {
 	struct webos_fence *wf = file->private_data;
 
-	printk("webos_fence_usync_release:fd=%d fence->reqno=%d\n", wf->fd, wf->base.seqno);
+	/* printk("webos_fence_usync_release:fd=%d reqno=%d\n", wf->fd, wf->base.seqno); */
 	wf->fd = -1;
 	wf->file = NULL;
 	return 0;
@@ -112,10 +61,14 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 	switch (cmd) {
 	case WEBOS_FENCE_IOC_WAIT:
 		/* printk("webos_fence_usync_ioctl-wait:%d %p\n", wf->base.seqno, wf); */
-		fence_wait_timeout(&wf->base, true, 10*HZ);
-		webos_fence_put(wf);
-
-		/* printk("meet fence[%d]:%p\n", wf->base.seqno, wf); */
+		fence_wait_timeout(&wf->base, true, WEBOS_FENCE_TIMEOUT);
+		/* printk("meet fence:%d %p\n", wf->base.seqno, wf); */
+		break;
+	case WEBOS_FENCE_IOC_READY:
+		webos_fence_ready(wf);
+		break;
+	case WEBOS_FENCE_IOC_SIGNAL:
+		fence_signal(&wf->base);
 		break;
 	default:
 		return -EINVAL;
@@ -132,22 +85,24 @@ static const struct file_operations webos_fence_usync_fops = {
 
 static void webos_fence_release(struct fence *fence)
 {
-	/* BUGBUG: What do I do at here?? */
-	/* not free fence */
-	printk("release fence=%p\n", fence);
-	/* fence_free(fence); */
+	struct webos_fence *wf = container_of(fence,
+					      struct webos_fence, base);
+	/* free webos_fence */
+	printk("release fence=%p seq=%d\n", fence, fence->seqno);
+	kfree_rcu(wf, rcu);
 }
 
 static bool webos_fence_enable_signaling(struct fence *fence)
 {
-	clear_bit(FENCE_FLAG_SIGNALED_BIT, &fence->flags);
-	
+	struct webos_fence *wf = container_of(fence,
+					      struct webos_fence, base);
+	webos_fence_ready(wf);
 	return true;
 }
 
 static const char *webos_fence_get_driver_name(struct fence *fence)
 {
-	return "buffer-manager";
+	return "webos_fence_v0.1";
 }
 
 static const char *webos_fence_get_timeline_name(struct fence *fence)
@@ -160,27 +115,22 @@ static const struct fence_ops webos_fence_ops = {
 	.get_timeline_name = webos_fence_get_timeline_name,
 	.enable_signaling = webos_fence_enable_signaling,
 	.wait = fence_default_wait,
-	//.signaled = webos_fence_signaled,
 	.release = webos_fence_release,
-	/* .fill_driver_data = webos_fence_fill_driver_data, */
 };
 
-struct webos_fence *webos_fence_get(void)
+void webos_fence_ready(struct webos_fence *wf)
 {
-	static uint32_t fence_seq = 0;
-	struct webos_fence *wf;
-
-	wf = wfence[fence_seq % 3];
-	fence_get(&wf->base);
-
-	wf->base.seqno = fence_seq;
-	fence_seq++;
-
-	/* recycle fence */
+	/*
+	 * fence_enable_sw_signaling cannot enable signal
+	 * if SIGNALED_BIT is already set.
+	 */
 	clear_bit(FENCE_FLAG_SIGNALED_BIT, &wf->base.flags);
-	
-	latest_fence = wf;
-	return wf;
+}
+EXPORT_SYMBOL(webos_fence_ready);
+
+void webos_fence_get(struct webos_fence *wf)
+{
+	fence_get(&wf->base);
 }
 EXPORT_SYMBOL(webos_fence_get);
 
@@ -190,11 +140,30 @@ void webos_fence_put(struct webos_fence *wf)
 }
 EXPORT_SYMBOL(webos_fence_put);
 
-struct webos_surface *webos_get_buf(int i)
+struct webos_fence *webos_create_fence(unsigned int context, unsigned int seq)
 {
-	return surface[i % 3];
+	struct webos_fence *wf;
+
+	wf = kmalloc(sizeof(struct webos_fence), GFP_KERNEL);
+	if (!wf)
+		return NULL;
+
+	spin_lock_init(&wf->lock);
+	wf->fd = -1;
+	wf->file = NULL;
+
+	fence_init(&wf->base,
+		   &webos_fence_ops,
+		   &wf->lock,
+		   /* context: id of something that fence is included */
+		   context,
+		   /* seq: id of fence */
+		   seq);
+	fence_enable_sw_signaling(&wf->base);
+	/* printk("create-fence:%d %d\n", wf->base.context, wf->base.seqno); */
+	return wf;
 }
-EXPORT_SYMBOL(webos_get_buf);
+EXPORT_SYMBOL(webos_create_fence);
 
 static long buf_man_ioctl(struct file *file, unsigned int cmd,
 			      unsigned long arg)
@@ -203,34 +172,35 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 	int fd;
 	struct webos_fence *wf;
 	int ret = 0;
-	int i;
 
 	switch (cmd) {
 	case BUF_MAN_IOC_CREATE_FENCE:
-		for (i = 0; i < 3; i++) {
-			/* BUGBUG: lock? */
-			wf = wfence[i];
-			wf->file = anon_inode_getfile("sync_fence",
-						      &webos_fence_usync_fops,
-						      wf, 0);
-			if (IS_ERR(wf->file))
-				return -EFAULT;
-
-			fd = get_unused_fd_flags(O_CLOEXEC);
-			fd_install(fd, wf->file);
-			wf->fd = fd;
-
-			printk("create user-fence:fence=%p fd=%d\n", wf, wf->fd);
+		if (copy_from_user(&info, (void __user *)arg, sizeof(info))) {
+			ret = -EFAULT;
+			break;
 		}
-		break;
-	case BUF_MAN_IOC_GET_FENCE:
-		wf = webos_fence_get();
+		wf = webos_create_fence(info.context,
+					atomic_inc_return(&webos_fence_index));
+		wf->file = anon_inode_getfile("sync_fence",
+					      &webos_fence_usync_fops,
+					      wf,
+					      0);
+		if (IS_ERR(wf->file)) {
+			printk("fail to create fence-fd\n");
+			return -EFAULT;
+		}
+
+		fd = get_unused_fd_flags(O_CLOEXEC);
+		fd_install(fd, wf->file);
+		wf->fd = fd;
+
+		printk("create user-fence:fence=%p fd=%d\n", wf, wf->fd);
+		
 		info.fd = wf->fd;
-		info.reqno = wf->base.seqno;
+		info.seqno = wf->base.seqno;
 		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
 			ret = -EFAULT;
 		break;
-
 	default:
 		return -ENOTTY;
 	}
@@ -241,6 +211,7 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 static int buf_man_open(struct inode *inode, struct file *file)
 {
 	file->private_data = NULL;
+	printk(KERN_CRIT "buf_man open\n");
 	return 0;
 }
 
@@ -248,6 +219,10 @@ static int buf_man_open(struct inode *inode, struct file *file)
 static int buf_man_release(struct inode *inode, struct file *file)
 {
 	printk(KERN_CRIT "buf_man release\n");
+
+	/* TODO: force to free every fence and resources */
+	/* close means this process is not using fence anymore */
+	/* For that, fence list is necessary. */
 	return 0;
 }
 
@@ -261,59 +236,20 @@ static const struct file_operations buf_man_fops = {
 
 static struct miscdevice buf_man_dev = {
 	.minor	= MISC_DYNAMIC_MINOR,
-	.name	= "buf_man",
+	.name	= "webos_buf_man",
 	.fops	= &buf_man_fops,
 };
 
 static int __init buf_man_init(void)
 {
-	int i;
-
-	for (i = 0; i < 3; i++) {
-		surface[i] = kzalloc(sizeof(struct webos_surface), GFP_KERNEL);
-		strlcpy(surface[i]->name, "surface", sizeof("surface"));
-		surface[i]->buf_size = SZ_1M * (i + 1);
-		surface[i]->buf = kzalloc(surface[i]->buf_size, GFP_KERNEL);
-		printk("create surface[%d]:%p buf=%p\n",
-		       i, surface[i], surface[i]->buf);
-
-		wfence[i] = kzalloc(sizeof(struct webos_fence), GFP_KERNEL);
-		spin_lock_init(&wfence[i]->lock);
-	
-		fence_init(&wfence[i]->base,
-			   &webos_fence_ops,
-			   &wfence[i]->lock,
-			   i, /* context=surface id */
-			   0); /* sequence number of fence */
-
-		fence_enable_sw_signaling(&wfence[i]->base);
-
-		printk("create fence:%p context=%d id=%d flag=%lx\n",
-		       wfence[i], wfence[i]->base.context,
-		       wfence[i]->base.seqno, wfence[i]->base.flags);
-	}
-
-	printk("buf_man start thread\n");
-	sync_thr = (struct task_struct *)kthread_run(sync_thr_func,
-						     NULL,
-						     "thread_sync");
-
+	printk("webos_buf_man start\n");
 	return misc_register(&buf_man_dev);
 }
 
 static void __exit buf_man_exit(void)
 {
-	int i;
-	kthread_stop(sync_thr);
-
-	for (i = 0; i < 3; i++) {
-		/* Calling fence_put to free fence occurs kernel panic of __call_rcu */
-		kfree(wfence[i]);
-		kfree(surface[i]->buf);
-		kfree(surface[i]);
-	}
-
 	misc_deregister(&buf_man_dev);
+	printk("webos_buf_man end\n");
 }
 
 module_init(buf_man_init);
