@@ -27,6 +27,7 @@ int main(void)
 {
 	int buf_man_fd;
 	struct webos_fence_fd_info info;
+	struct webos_fence_wait_info wait_info;
 	int ret;
 	int i;
 	int fence_fd[10] = {0, };
@@ -54,7 +55,9 @@ int main(void)
 
 		/* main waits for fence and thread signals fence */
 		pthread_create(&thr, NULL, thr_signal_fence, &info);
-		ret = ioctl(info.fd, WEBOS_FENCE_IOC_WAIT, NULL);
+
+		wait_info.timeout = 5;
+		ret = ioctl(info.fd, WEBOS_FENCE_IOC_WAIT, &wait_info);
 		if (ret < 0) {
 			perror("[APP] fail to wait fence\n");
 			break;

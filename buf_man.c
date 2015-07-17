@@ -57,11 +57,18 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
 	struct webos_fence *wf = file->private_data;
+	struct webos_fence_wait_info wait_info;
+	long ret = 0;
 
 	switch (cmd) {
 	case WEBOS_FENCE_IOC_WAIT:
+		if (copy_from_user(&wait_info,
+				   (void __user *)arg,
+				   sizeof(wait_info)))
+			wait_info.timeout = 10; /* default */
+
 		/* printk("webos_fence_usync_ioctl-wait:%d %p\n", wf->base.seqno, wf); */
-		fence_wait_timeout(&wf->base, true, WEBOS_FENCE_TIMEOUT);
+		fence_wait_timeout(&wf->base, true, wait_info.timeout * HZ);
 		/* printk("meet fence:%d %p\n", wf->base.seqno, wf); */
 		break;
 	case WEBOS_FENCE_IOC_READY:
@@ -74,7 +81,7 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 		return -EINVAL;
 	}
 
-	return 0;
+	return ret;
 }
 
 static const struct file_operations webos_fence_usync_fops = {
@@ -171,7 +178,7 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 	struct webos_fence_fd_info info;
 	int fd;
 	struct webos_fence *wf;
-	int ret = 0;
+	long ret = 0;
 
 	switch (cmd) {
 	case BUF_MAN_IOC_CREATE_FENCE:

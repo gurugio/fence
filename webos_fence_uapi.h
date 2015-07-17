@@ -8,9 +8,6 @@ typedef __signed__ int __s32;
 #define WEBOS_FENCE_IOC_SIGNAL		_IOW(WEBOS_FENCE_IOC_MAGIC, 4, __s32)
 
 
-#define WEBOS_FENCE_TIMEOUT 10*HZ
-
-
 struct webos_fence_fd_info
 {
 	/* input */
@@ -18,4 +15,10 @@ struct webos_fence_fd_info
 	/* output */
 	unsigned int seqno;
 	int fd;
+};
+
+struct webos_fence_wait_info
+{
+	/* input */
+	int timeout;
 };
