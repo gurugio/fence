@@ -33,6 +33,11 @@ struct webos_fence
 	struct fence base;
 	spinlock_t lock;
 	struct rcu_head rcu;
+	struct list_head merged;
+
+	/* TODO: debugfs */
+	char name[64];
+	struct list_head webos_fence_list;
 
 	/* for process */
 	int fd;
@@ -40,6 +45,8 @@ struct webos_fence
 };
 
 static atomic_t webos_fence_index = ATOMIC_INIT(0);
+LIST_HEAD(webos_fence_list_head);
+DEFINE_SPINLOCK(webos_fence_list_lock);
 
 
 void webos_fence_ready(struct webos_fence *wf)
@@ -76,6 +83,11 @@ void webos_fence_wait(struct webos_fence *wf, int timeout_sec)
 }
 EXPORT_SYMBOL(webos_fence_wait);
 
+/* This is called when user close the fd of fence.
+ * It means the user will not use the fence anymore,
+ * so the fence is released by fence_put().
+ * If the fence ref-count is zero, it is freed by "struct fence_ops->release" */
+ */
 static int webos_fence_usync_release(struct inode *inode, struct file *file)
 {
 	struct webos_fence *wf = file->private_data;
@@ -83,14 +95,19 @@ static int webos_fence_usync_release(struct inode *inode, struct file *file)
 	/* printk("webos_fence_usync_release:fd=%d reqno=%d\n", wf->fd, wf->base.seqno); */
 	wf->fd = -1;
 	wf->file = NULL;
+
+	fence_put(&wf->base);
+
 	return 0;
 }
 
+/* ioctl of fence-fd */
 static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 			     unsigned long arg)
 {
 	struct webos_fence *wf = file->private_data;
 	struct webos_fence_wait_info wait_info;
+	struct webos_fence_merge_info merge_info;
 	long ret = 0;
 
 	switch (cmd) {
@@ -119,6 +136,7 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 	return ret;
 }
 
+/* operations of fence-fd */
 static const struct file_operations webos_fence_usync_fops = {
 	.release = webos_fence_usync_release,
 	.unlocked_ioctl = webos_fence_usync_ioctl,
@@ -127,10 +145,15 @@ static const struct file_operations webos_fence_usync_fops = {
 
 static void webos_fence_release(struct fence *fence)
 {
+	unsigned long flags;
 	struct webos_fence *wf = container_of(fence,
 					      struct webos_fence, base);
-	/* free webos_fence */
-	printk("release fence=%p seq=%d\n", fence, fence->seqno);
+
+	spin_lock_irqsave(&webos_fence_list_lock, flags);
+	list_del(&wf->webos_fence_list);
+	spin_unlock_irqrestore(&webos_fence_list_lock, flags);
+
+/* free webos_fence */
 	kfree_rcu(wf, rcu);
 }
 
@@ -163,6 +186,7 @@ static const struct fence_ops webos_fence_ops = {
 struct webos_fence *webos_create_fence(unsigned int context, unsigned int seq)
 {
 	struct webos_fence *wf;
+	unsigned long flags;
 
 	wf = kmalloc(sizeof(struct webos_fence), GFP_KERNEL);
 	if (!wf)
@@ -171,6 +195,8 @@ struct webos_fence *webos_create_fence(unsigned int context, unsigned int seq)
 	spin_lock_init(&wf->lock);
 	wf->fd = -1;
 	wf->file = NULL;
+	INIT_LIST_HEAD(&wf->webos_fence_list);
+	INIT_LIST_HEAD(&wf->merged);
 
 	fence_init(&wf->base,
 		   &webos_fence_ops,
@@ -181,10 +207,18 @@ struct webos_fence *webos_create_fence(unsigned int context, unsigned int seq)
 		   seq);
 	fence_enable_sw_signaling(&wf->base);
 	/* printk("create-fence:%d %d\n", wf->base.context, wf->base.seqno); */
+
+	snprintf(wf->name, 64, "%s:%d:%d", current->comm, context, seq);
+
+	spin_lock_irqsave(&webos_fence_list_lock, flags);
+	list_add_tail(&wf->webos_fence_list, &webos_fence_list_head);
+	spin_unlock_irqrestore(&webos_fence_list_lock, flags);
+
 	return wf;
 }
 EXPORT_SYMBOL(webos_create_fence);
 
+/* ioctl of /dev/buf_man */
 static long buf_man_ioctl(struct file *file, unsigned int cmd,
 			      unsigned long arg)
 {
@@ -201,7 +235,7 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 		}
 		wf = webos_create_fence(info.context,
 					atomic_inc_return(&webos_fence_index));
-		wf->file = anon_inode_getfile("sync_fence",
+		wf->file = anon_inode_getfile("webos_sync_fence",
 					      &webos_fence_usync_fops,
 					      wf,
 					      0);
@@ -218,8 +252,12 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 		
 		info.fd = wf->fd;
 		info.seqno = wf->base.seqno;
-		if (copy_to_user((void __user *)arg, &info, sizeof(info)))
+		if (copy_to_user((void __user *)arg, &info, sizeof(info))) {
+			put_unused_fd(wf->fd);
+			fput(wf->file);
+			webos_fence_release(&wf->base);
 			ret = -EFAULT;
+		}
 		break;
 	default:
 		return -ENOTTY;
@@ -246,6 +284,7 @@ static int buf_man_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
+/* operations of /dev/buf_man */
 static const struct file_operations buf_man_fops = {
 	.owner = THIS_MODULE,
 	.open = buf_man_open,

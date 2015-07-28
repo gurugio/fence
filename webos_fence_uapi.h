@@ -22,3 +22,13 @@ struct webos_fence_wait_info
 	/* input */
 	int timeout;
 };
+
+struct webos_fence_merge_info
+{
+	/* fence to be merged */
+	int fd2;
+
+	/* new fence */
+	int fence;
+	unsigned int seqno;
+};
