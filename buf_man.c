@@ -211,28 +211,50 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 	/* link old fences */
 	/* closing fd, file of old fences is done by user's close() */
 
-	BUG_ON(wf->flags == WF_MERGED && !list_empty(&wf->merged));
+	if (wf->flags == WF_PARENT) {
+		wf->flags = WF_MERGED;
+		list_splice(wf->merged.next, &new_wf->merged);
+		{
+			struct webos_fence *merge;
 
-	if (wf->flags == WF_PARENT && !list_empty(&wf->merged)) {
-		/* TODO: merge fence that has children */
-
-	} else {
-		wf->flags |= WF_MERGED;
+			/* wait for signals of all merged fences */
+			list_for_each_entry(merge, &new_wf->merged, merged) {
+				printk("new-wf-child: %p\n", merge);
+			}
+		}
+	} else if (wf->flags == 0x0) {
+		wf->flags = WF_MERGED;
 		list_add_tail(&wf->merged, &new_wf->merged);
 		printk("merge1:%p\n", wf);
+	} else {
+		/* alread merged fence cannot be visible to user */
+		BUG();
+	}
 
-		printk("info->fd2=%d\n", info->fd2);
-		merge_wf = webos_fence_fdget(info->fd2);
-		merge_wf->flags |= WF_MERGED;
+
+
+	merge_wf = webos_fence_fdget(info->fd2);
+	if (merge_wf->flags == WF_PARENT) {
+		merge_wf->flags = WF_MERGED;
+		list_splice(merge_wf->merged.next, &new_wf->merged);
+		{
+			struct webos_fence *merge;
+
+			/* wait for signals of all merged fences */
+			list_for_each_entry(merge, &new_wf->merged, merged) {
+				printk("new-wf-child: %p\n", merge);
+			}
+		}
+	} else if (merge_wf->flags == 0x0) {
+		merge_wf->flags = WF_MERGED;
 		list_add_tail(&merge_wf->merged, &new_wf->merged);
 		printk("merge2:%p\n", merge_wf);
-
-		/*
-		 * webos_fence_fdget gets file of merge_wf,
-		 * so it needs to put.
-		 */
-		fput(merge_wf->file);
 	}
+	/*
+	 * webos_fence_fdget gets file of merge_wf,
+	 * so it needs to put.
+	 */
+	fput(merge_wf->file);
 
 	return 0;
 }
