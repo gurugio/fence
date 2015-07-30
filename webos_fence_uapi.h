@@ -6,7 +6,7 @@ typedef __signed__ int __s32;
 #define WEBOS_FENCE_IOC_WAIT 		_IOW(WEBOS_FENCE_IOC_MAGIC, 2, __s32)
 #define WEBOS_FENCE_IOC_READY		_IOW(WEBOS_FENCE_IOC_MAGIC, 3, __s32)
 #define WEBOS_FENCE_IOC_SIGNAL		_IOW(WEBOS_FENCE_IOC_MAGIC, 4, __s32)
-
+#define WEBOS_FENCE_IOC_MERGE		_IOW(WEBOS_FENCE_IOC_MAGIC, 5, __s32)
 
 struct webos_fence_fd_info
 {
