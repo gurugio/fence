@@ -63,7 +63,18 @@ void webos_fence_ready(struct webos_fence *wf)
 	 * fence_enable_sw_signaling cannot enable signal
 	 * if SIGNALED_BIT is already set.
 	 */
-	clear_bit(FENCE_FLAG_SIGNALED_BIT, &wf->base.flags);
+	if (wf->flags == WF_PARENT) {
+		struct webos_fence *merge;
+
+		list_for_each_entry(merge, &wf->merged, merged) {
+			WARN_ON(merge->flags != WF_MERGED);
+			clear_bit(FENCE_FLAG_SIGNALED_BIT, &merge->base.flags);
+		}
+	} else if (wf->flags == 0) {
+		clear_bit(FENCE_FLAG_SIGNALED_BIT, &wf->base.flags);
+	} else {
+		BUG();
+	}
 }
 EXPORT_SYMBOL(webos_fence_ready);
 
@@ -79,24 +90,30 @@ void webos_fence_put(struct webos_fence *wf)
 }
 EXPORT_SYMBOL(webos_fence_put);
 
-void webos_fence_signal(struct webos_fence *wf)
+int webos_fence_signal(struct webos_fence *wf)
 {
+	int ret = 0;
+
 	if (wf->flags == WF_PARENT) {
 		/* signal parent fence */
 		struct webos_fence *merge;
 
 		/* wait for signals of all merged fences */
 		list_for_each_entry(merge, &wf->merged, merged) {
-			int ret;
+			WARN_ON(merge->flags != WF_MERGED);
 			printk("signal-child: %p\n", merge);
 			ret = fence_signal(&merge->base);
 			if (ret < 0)
 				printk("ERROR: fail to signal fence:%p\n", merge);
 		}
-	} else {
+	} else if (wf->flags == 0) {
 		/* signal normal or merged fence */
-		fence_signal(&wf->base);
+		ret = fence_signal(&wf->base);
+	} else {
+		/* merged fence cannot be visible to user */
+		BUG();
 	}
+	return ret;
 }
 EXPORT_SYMBOL(webos_fence_signal);
 
@@ -110,20 +127,25 @@ int webos_fence_wait(struct webos_fence *wf, int timeout_sec)
 
 		/* wait for signals of all merged fences */
 		list_for_each_entry_safe(merge, tmp, &wf->merged, merged) {
+			WARN_ON(merge->flags != WF_MERGED);
+
 			printk("wait-child: %p\n", merge);
 			timeout = fence_wait_timeout(&merge->base,
 						     true, timeout_sec * HZ);
+			printk("wait-ret=%d\n", timeout);
 			if (timeout <= 0) {
 				ret = -ETIME;
 				break;
 			}
 		}
-	} else {
+	} else if (wf->flags == 0) {
 		timeout = fence_wait_timeout(&wf->base, true, timeout_sec * HZ);
 		if (timeout <= 0)
 			ret = -ETIME;
+	} else {
+		/* merged fence cannot be visible to user */
+		BUG();
 	}
-
 	return ret;
 }
 EXPORT_SYMBOL(webos_fence_wait);
@@ -151,6 +173,7 @@ static int webos_fence_usync_release(struct inode *inode, struct file *file)
 
 	if (wf->flags == WF_PARENT) {
 		list_for_each_entry_safe(merge, tmp, &wf->merged, merged) {
+			WARN_ON(merge->flags != WF_MERGED);
 			list_del(&merge->merged);
 			fence_put(&merge->base);
 		}
@@ -213,7 +236,7 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 
 	if (wf->flags == WF_PARENT) {
 		wf->flags = WF_MERGED;
-		list_splice(wf->merged.next, &new_wf->merged);
+		list_splice(&wf->merged, &new_wf->merged);
 		{
 			struct webos_fence *merge;
 
@@ -285,7 +308,7 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 		break;
 	case WEBOS_FENCE_IOC_SIGNAL:
 		/* fence_signal(&wf->base); */
-		webos_fence_signal(wf);
+		ret = webos_fence_signal(wf);
 		break;
 	case WEBOS_FENCE_IOC_MERGE:
 		if (copy_from_user(&merge_info,

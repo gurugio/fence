@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <assert.h>
 
 #include "webos_fence_uapi.h"
 
@@ -29,6 +30,8 @@ void webos_buf_merge_test(int buf_man_fd)
 	int ret;
 	struct webos_fence_fd_info info;
 	int parent_fence, parent_seqno;
+	int grand_parent_fence, grand_parent_seqno;
+
 	int child_fence[5];
 	int child_seqno[5];
 	struct webos_fence_merge_info merge_info;
@@ -37,6 +40,9 @@ void webos_buf_merge_test(int buf_man_fd)
 
 	printf("====================== start merge test ===================\n");
 
+	/*
+	 * TEST: merge leaf-fences
+	 */
 	for (i = 0; i < 2; i++) {
 		info.context = 1235+i;
 		ret = ioctl(buf_man_fd, BUF_MAN_IOC_CREATE_FENCE, &info);
@@ -50,63 +56,106 @@ void webos_buf_merge_test(int buf_man_fd)
 		child_seqno[i] = info.seqno;
 	}
 
-	/* merge normal fences */
+	/* grand_fence = child_fence[0] + child_fence[1] */
 	merge_info.fd2 = child_fence[1];
 	ret = ioctl(child_fence[0], WEBOS_FENCE_IOC_MERGE, &merge_info);
 	if (ret < 0) {
 		perror("[APP] fail to merge");
-		return;
+		assert(ret >= 0);
 	}
 	parent_fence = merge_info.fence;
 	parent_seqno = merge_info.seqno;
-	printf("parent fd=%d seqno=%d\n", merge_info.fence, merge_info.seqno);
+	printf("parent seqno=%d fd=%d\n", parent_seqno, parent_fence);
 	sleep(1);
 
-	info.fd = merge_info.fence;
-	info.seqno = merge_info.seqno;
-	/* main waits for fence and thread signals fence */
+	info.fd = parent_fence;
+	info.seqno = parent_seqno;
 	pthread_create(&thr, NULL, thr_signal_fence, &info);
 
 	wait_info.timeout = 20;
 	ret = ioctl(info.fd, WEBOS_FENCE_IOC_WAIT, &wait_info);
-	if (ret < 0) {
-		perror("[APP] fail to wait fence\n");
-	}
+	assert(ret >= 0);
 	printf("meet-fence:seq=%d fd=%d\n", info.seqno, info.fd);
 	pthread_join(thr, NULL);
 
 
-	/* TODO: test to merge merged-fence and normal fence */
+	/*
+	 * TEST: merge parent fence and leaf fence
+	 */
 	info.context = 1333;
 	ret = ioctl(buf_man_fd, BUF_MAN_IOC_CREATE_FENCE, &info);
-	if (ret < 0) {
-		perror("[APP]fail to create user-fence\n");
-	}
+	assert(ret >= 0);
 	printf("created-fence:seq=%d fd=%d\n", info.seqno, info.fd);
 
 	child_fence[2] = info.fd;
 	child_seqno[2] = info.seqno;
 
+	/* recycle parent_fence to accept signal
+	 * or signal will fail */
+	ret = ioctl(parent_fence, WEBOS_FENCE_IOC_READY, NULL);
+	assert(ret >= 0);
+
+	/* grand_parend_fence = parent_fence + child_fence[2] */
 	merge_info.fd2 = child_fence[2];
 	ret = ioctl(parent_fence, WEBOS_FENCE_IOC_MERGE, &merge_info);
-	if (ret < 0) {
-		perror("[APP] fail to merge");
-	}
+	assert(ret >= 0);
 
-	printf("parent fd=%d seqno=%d\n", merge_info.fence, merge_info.seqno);
+	grand_parent_fence = merge_info.fence;
+	grand_parent_seqno = merge_info.seqno;
+	printf("grand-parent fd=%d seqno=%d\n", grand_parent_fence, grand_parent_seqno);
+	sleep(1);
 
+	info.fd = grand_parent_fence;
+	info.seqno = grand_parent_seqno;
+	pthread_create(&thr, NULL, thr_signal_fence, &info);
+
+	wait_info.timeout = 20;
+	ret = ioctl(info.fd, WEBOS_FENCE_IOC_WAIT, &wait_info);
+	assert(ret >= 0);
+
+	printf("meet-fence:seq=%d fd=%d\n", info.seqno, info.fd);
+	pthread_join(thr, NULL);
+
+	/*
+	 * TEST: recycle merged fence
+	 */
+	info.fd = grand_parent_fence;
+	info.seqno = grand_parent_seqno;
+	pthread_create(&thr, NULL, thr_signal_fence, &info);
+
+	wait_info.timeout = 10;
+	ret = ioctl(info.fd, WEBOS_FENCE_IOC_WAIT, &wait_info);
+	/* wait must fail without ready */
+	assert(ret >= 0);
+	printf("wait-fence fails:seq=%d fd=%d\n", info.seqno, info.fd);
+	pthread_join(thr, NULL);
+
+	ret = ioctl(grand_parent_fence, WEBOS_FENCE_IOC_READY, NULL);
+	assert(ret >= 0);
+
+	info.fd = grand_parent_fence;
+	info.seqno = grand_parent_seqno;
+	pthread_create(&thr, NULL, thr_signal_fence, &info);
+
+	wait_info.timeout = 20;
+	ret = ioctl(info.fd, WEBOS_FENCE_IOC_WAIT, &wait_info);
+	/* wait must success after ready */
+	assert(ret >= 0);
+	printf("wait-fence fails:seq=%d fd=%d\n", info.seqno, info.fd);
+	pthread_join(thr, NULL);
+
+	/*
+	 * END of test
+	 */
 	sleep(1);
 	close(child_fence[2]);
 	close(child_fence[0]);
 	close(child_fence[1]);
 
-	/* printf("close child-fences\n"); */
-
-	close(merge_info.fence);
+	close(grand_parent_fence);
 	close(parent_fence);
-	printf("close parent-fence\n");
 
-	sleep(2);
+	sleep(1);
 
 	printf("======================= end merge test =====================\n");
 	return;
@@ -130,7 +179,6 @@ int main(void)
 	}
 
 	webos_buf_merge_test(buf_man_fd);
-	goto MAIN_END;
 
 	for (i = 0; i < 10; i++) {
 		info.context = 1234 + i;
@@ -163,7 +211,6 @@ int main(void)
 		if (fence_fd[i] > 0) close(fence_fd[i]);
 	}
 MAIN_END:
-	/* BUGBUG: it should close every-fd of every-fence. */
 	close(buf_man_fd);
 	return 0;
 }
