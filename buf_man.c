@@ -22,6 +22,8 @@
 
 #include <linux/sizes.h>
 #include <linux/fence.h>
+#include <linux/seq_file.h>
+#include <linux/debugfs.h>
 
 #include "webos_fence_uapi.h"
 
@@ -55,7 +57,69 @@ struct webos_fence
 static atomic_t webos_fence_index = ATOMIC_INIT(0);
 LIST_HEAD(webos_fence_list_head);
 DEFINE_SPINLOCK(webos_fence_list_lock);
+struct dentry *webos_fence_debugfs;
 
+static const char *webos_fence_flags_str(int flags)
+{
+	switch (flags) {
+	case WF_PARENT:
+		return "PARENT";
+	case WF_MERGED:
+		return "MERGED";
+	case 0:
+		return "NORMAL";
+	}
+	return "FLAG-ERROR";
+}
+
+static void webos_fence_print_fence(struct seq_file *s, struct webos_fence *wf)
+{
+	struct webos_fence *merge;
+	seq_printf(s, "[%p] name=%s flag=%s fd=%d\n",
+		   wf,
+		   wf->name,
+		   webos_fence_flags_str(wf->flags),
+		   wf->fd);
+
+	if (wf->flags == WF_PARENT) {
+		WARN_ON(list_empty(&wf->merged));
+		list_for_each_entry(merge, &wf->merged, merged) {
+			WARN_ON(merge->flags != WF_MERGED);
+			seq_printf(s, "    child-[%p] name=%s flag=%s fd=%d\n",
+				   merge,
+				   merge->name,
+				   webos_fence_flags_str(merge->flags),
+				   merge->fd);
+		}
+	}
+}
+
+static int webos_fence_debugfs_show(struct seq_file *s, void *unused)
+{
+	unsigned long flags;
+	struct webos_fence *wf;
+
+	spin_lock_irqsave(&webos_fence_list_lock, flags);
+	seq_puts(s, "NAME=comm:pid:context:reqno\n");
+	list_for_each_entry(wf, &webos_fence_list_head, webos_fence_list) {
+		webos_fence_print_fence(s, wf);
+	}
+	spin_unlock_irqrestore(&webos_fence_list_lock, flags);
+
+	return 0;
+}
+
+static int webos_fence_debugfs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, webos_fence_debugfs_show, inode->i_private);
+}
+
+static const struct file_operations webos_fence_debugfs_fops = {
+	.open           = webos_fence_debugfs_open,
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release        = single_release,
+};
 
 void webos_fence_ready(struct webos_fence *wf)
 {
@@ -73,7 +137,7 @@ void webos_fence_ready(struct webos_fence *wf)
 	} else if (wf->flags == 0) {
 		clear_bit(FENCE_FLAG_SIGNALED_BIT, &wf->base.flags);
 	} else {
-		BUG();
+		__WARN();
 	}
 }
 EXPORT_SYMBOL(webos_fence_ready);
@@ -111,7 +175,7 @@ int webos_fence_signal(struct webos_fence *wf)
 		ret = fence_signal(&wf->base);
 	} else {
 		/* merged fence cannot be visible to user */
-		BUG();
+		__WARN();
 	}
 	return ret;
 }
@@ -144,7 +208,7 @@ int webos_fence_wait(struct webos_fence *wf, int timeout_sec)
 			ret = -ETIME;
 	} else {
 		/* merged fence cannot be visible to user */
-		BUG();
+		__WARN();
 	}
 	return ret;
 }
@@ -181,6 +245,10 @@ static int webos_fence_usync_release(struct inode *inode, struct file *file)
 	} else if (wf->flags == WF_MERGED) {
 		/* merged fence is freed when the parent fence is freed */
 		printk("not freed: prev=%p next=%p\n", wf->merged.prev, wf->merged.next);
+	} else if (wf->flags == 0) {
+		fence_put(&wf->base);
+	} else {
+		__WARN();
 	}
 
 	return 0;
@@ -231,11 +299,11 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 	info->fence = new_wf->fd;
 	info->seqno = new_wf->base.seqno;
 
-	/* link old fences */
-	/* closing fd, file of old fences is done by user's close() */
-
 	if (wf->flags == WF_PARENT) {
-		wf->flags = WF_MERGED;
+		/* children are moved into new-parent
+		 * and parent becomes normal fence
+		 */
+		wf->flags = 0;
 		list_splice(&wf->merged, &new_wf->merged);
 		{
 			struct webos_fence *merge;
@@ -250,10 +318,9 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 		list_add_tail(&wf->merged, &new_wf->merged);
 		printk("merge1:%p\n", wf);
 	} else {
-		/* alread merged fence cannot be visible to user */
-		BUG();
+		/* merged fence cannot be visible to user */
+		__WARN();
 	}
-
 
 
 	merge_wf = webos_fence_fdget(info->fd2);
@@ -272,6 +339,8 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 		merge_wf->flags = WF_MERGED;
 		list_add_tail(&merge_wf->merged, &new_wf->merged);
 		printk("merge2:%p\n", merge_wf);
+	} else {
+		__WARN();
 	}
 	/*
 	 * webos_fence_fdget gets file of merge_wf,
@@ -500,12 +569,16 @@ static struct miscdevice buf_man_dev = {
 static int __init buf_man_init(void)
 {
 	printk("webos_buf_man start\n");
+	webos_fence_debugfs = debugfs_create_file("webos_fence", S_IRUGO,
+						  NULL, NULL,
+						  &webos_fence_debugfs_fops);
 	return misc_register(&buf_man_dev);
 }
 
 static void __exit buf_man_exit(void)
 {
 	misc_deregister(&buf_man_dev);
+	debugfs_remove(webos_fence_debugfs);
 	printk("webos_buf_man end\n");
 }
 
