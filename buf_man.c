@@ -33,6 +33,12 @@ static struct webos_fence *webos_create_fence(unsigned int context, unsigned int
 static const struct file_operations webos_fence_usync_fops;
 static const struct file_operations webos_fence_usync_fops;
 
+#if defined(BUF_MAN_DEBUG)
+# define PRINT_DEBUG(fmt, args...) printk("WEBOS-FENCE: " fmt, ##args)
+#else
+# define PRINT_DEBUG(fmt, args...)
+#endif
+
 
 #define WF_MERGED 0x1
 #define WF_PARENT 0x2
@@ -165,10 +171,10 @@ int webos_fence_signal(struct webos_fence *wf)
 		/* wait for signals of all merged fences */
 		list_for_each_entry(merge, &wf->merged, merged) {
 			WARN_ON(merge->flags != WF_MERGED);
-			printk("signal-child: %p\n", merge);
+			PRINT_DEBUG("signal-child: %p\n", merge);
 			ret = fence_signal(&merge->base);
 			if (ret < 0)
-				printk("ERROR: fail to signal fence:%p\n", merge);
+				PRINT_DEBUG("ERROR: fail to signal fence:%p\n", merge);
 		}
 	} else if (wf->flags == 0) {
 		/* signal normal or merged fence */
@@ -193,10 +199,10 @@ int webos_fence_wait(struct webos_fence *wf, int timeout_sec)
 		list_for_each_entry_safe(merge, tmp, &wf->merged, merged) {
 			WARN_ON(merge->flags != WF_MERGED);
 
-			printk("wait-child: %p\n", merge);
+			PRINT_DEBUG("wait-child: %p\n", merge);
 			timeout = fence_wait_timeout(&merge->base,
 						     true, timeout_sec * HZ);
-			printk("wait-ret=%d\n", timeout);
+			PRINT_DEBUG("wait-ret=%ld\n", timeout);
 			if (timeout <= 0) {
 				ret = -ETIME;
 				break;
@@ -224,14 +230,21 @@ static int webos_fence_usync_release(struct inode *inode, struct file *file)
 	struct webos_fence *wf = file->private_data;
 	struct webos_fence *merge, *tmp;
 
-	printk("%s:name=%s fd=%d reqno=%d flags=%x\n",
-	       __FUNCTION__, wf->name, wf->fd, wf->base.seqno, wf->flags);
-
 	if (wf->flags == WF_MERGED)
-		printk("release merged fence: fd=%d reqno=%d\n", wf->fd, wf->base.seqno);
-	if (wf->flags == WF_PARENT)
-		printk("release parent fence: fd=%d reqno=%d\n", wf->fd, wf->base.seqno);
+		PRINT_DEBUG("%s: merged-fence: fd=%d reqno=%d\n",
+			    __FUNCTION__, wf->fd, wf->base.seqno);
+	else if (wf->flags == WF_PARENT)
+		PRINT_DEBUG("%s: parent-fence: fd=%d reqno=%d\n",
+			    __FUNCTION__, wf->fd, wf->base.seqno);
+	else if (wf->flags == 0)
+		PRINT_DEBUG("%s: normal-fence: fd=%d reqno=%d\n",
+			    __FUNCTION__, wf->fd, wf->base.seqno);
+	else
+		PRINT_DEBUG("%s: FLAG-ERROR: fd=%d reqno=%d\n",
+			    __FUNCTION__, wf->fd, wf->base.seqno);
 
+
+	/* file is closed */
 	wf->fd = -1;
 	wf->file = NULL;
 
@@ -244,7 +257,7 @@ static int webos_fence_usync_release(struct inode *inode, struct file *file)
 		fence_put(&wf->base);
 	} else if (wf->flags == WF_MERGED) {
 		/* merged fence is freed when the parent fence is freed */
-		printk("not freed: prev=%p next=%p\n", wf->merged.prev, wf->merged.next);
+		PRINT_DEBUG("not freed: prev=%p next=%p\n", wf->merged.prev, wf->merged.next);
 	} else if (wf->flags == 0) {
 		fence_put(&wf->base);
 	} else {
@@ -285,7 +298,7 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 				      new_wf,
 				      0);
 	if (IS_ERR(new_wf->file)) {
-		printk("fail to create fence-fd\n");
+		PRINT_DEBUG("fail to create fence-fd\n");
 		return -EFAULT;
 	}
 
@@ -294,7 +307,7 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 	new_wf->fd = fd;
 	new_wf->flags |= WF_PARENT;
 
-	printk("create parent-fence:fence=%p fd=%d\n", new_wf, new_wf->fd);
+	PRINT_DEBUG("create parent-fence:fence=%p fd=%d\n", new_wf, new_wf->fd);
 
 	info->fence = new_wf->fd;
 	info->seqno = new_wf->base.seqno;
@@ -310,13 +323,13 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 
 			/* wait for signals of all merged fences */
 			list_for_each_entry(merge, &new_wf->merged, merged) {
-				printk("new-wf-child: %p\n", merge);
+				PRINT_DEBUG("new-wf-child: %p\n", merge);
 			}
 		}
 	} else if (wf->flags == 0x0) {
 		wf->flags = WF_MERGED;
 		list_add_tail(&wf->merged, &new_wf->merged);
-		printk("merge1:%p\n", wf);
+		PRINT_DEBUG("merge1:%p\n", wf);
 	} else {
 		/* merged fence cannot be visible to user */
 		__WARN();
@@ -332,13 +345,13 @@ static long webos_fence_merge(struct webos_fence *wf, struct webos_fence_merge_i
 
 			/* wait for signals of all merged fences */
 			list_for_each_entry(merge, &new_wf->merged, merged) {
-				printk("new-wf-child: %p\n", merge);
+				PRINT_DEBUG("move-child: %p\n", merge);
 			}
 		}
 	} else if (merge_wf->flags == 0x0) {
 		merge_wf->flags = WF_MERGED;
 		list_add_tail(&merge_wf->merged, &new_wf->merged);
-		printk("merge2:%p\n", merge_wf);
+		PRINT_DEBUG("merge2:%p\n", merge_wf);
 	} else {
 		__WARN();
 	}
@@ -367,16 +380,12 @@ static long webos_fence_usync_ioctl(struct file *file, unsigned int cmd,
 				   sizeof(wait_info)))
 			wait_info.timeout = 10; /* default */
 
-		/* printk("webos_fence_usync_ioctl-wait:%d %p\n", wf->base.seqno, wf); */
-		/* fence_wait_timeout(&wf->base, true, wait_info.timeout * HZ); */
 		ret = webos_fence_wait(wf, wait_info.timeout);
-		/* printk("meet fence:%d %p\n", wf->base.seqno, wf); */
 		break;
 	case WEBOS_FENCE_IOC_READY:
 		webos_fence_ready(wf);
 		break;
 	case WEBOS_FENCE_IOC_SIGNAL:
-		/* fence_signal(&wf->base); */
 		ret = webos_fence_signal(wf);
 		break;
 	case WEBOS_FENCE_IOC_MERGE:
@@ -414,7 +423,7 @@ static void webos_fence_release(struct fence *fence)
 	struct webos_fence *wf = container_of(fence,
 					      struct webos_fence, base);
 
-	printk("%s: release fence=%p seqno=%d\n", __FUNCTION__, fence, fence->seqno);
+	PRINT_DEBUG("%s: release fence=%p seqno=%d\n", __FUNCTION__, fence, fence->seqno);
 	spin_lock_irqsave(&webos_fence_list_lock, flags);
 	list_del(&wf->webos_fence_list);
 	spin_unlock_irqrestore(&webos_fence_list_lock, flags);
@@ -472,7 +481,6 @@ struct webos_fence *webos_create_fence(unsigned int context, unsigned int seq)
 		   /* seq: id of fence */
 		   seq);
 	fence_enable_sw_signaling(&wf->base);
-	/* printk("create-fence:%d %d\n", wf->base.context, wf->base.seqno); */
 
 	snprintf(wf->name, 64, "%s:%d:%d:%d",
 		 current->comm, (int)(current->pid), context, seq);
@@ -507,7 +515,7 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 					      wf,
 					      0);
 		if (IS_ERR(wf->file)) {
-			printk("fail to create fence-fd\n");
+			PRINT_DEBUG("fail to create fence-fd\n");
 			return -EFAULT;
 		}
 
@@ -515,7 +523,7 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 		fd_install(fd, wf->file);
 		wf->fd = fd;
 
-		printk("create user-fence:fence=%p fd=%d\n", wf, wf->fd);
+		PRINT_DEBUG("create user-fence:fence=%p fd=%d\n", wf, wf->fd);
 		
 		info.fd = wf->fd;
 		info.seqno = wf->base.seqno;
@@ -536,18 +544,14 @@ static long buf_man_ioctl(struct file *file, unsigned int cmd,
 static int buf_man_open(struct inode *inode, struct file *file)
 {
 	file->private_data = NULL;
-	printk(KERN_CRIT "buf_man open\n");
+	PRINT_DEBUG(KERN_CRIT "buf_man open\n");
 	return 0;
 }
 
 
 static int buf_man_release(struct inode *inode, struct file *file)
 {
-	printk(KERN_CRIT "buf_man release\n");
-
-	/* TODO: force to free every fence and resources */
-	/* close means this process is not using fence anymore */
-	/* For that, fence list is necessary. */
+	PRINT_DEBUG(KERN_CRIT "buf_man release\n");
 	return 0;
 }
 
@@ -568,7 +572,7 @@ static struct miscdevice buf_man_dev = {
 
 static int __init buf_man_init(void)
 {
-	printk("webos_buf_man start\n");
+	PRINT_DEBUG("webos_buf_man start\n");
 	webos_fence_debugfs = debugfs_create_file("webos_fence", S_IRUGO,
 						  NULL, NULL,
 						  &webos_fence_debugfs_fops);
@@ -577,9 +581,17 @@ static int __init buf_man_init(void)
 
 static void __exit buf_man_exit(void)
 {
+	struct webos_fence *wf, *tmp;
+
+	WARN_ON(!list_empty(&webos_fence_list_head));
+	list_for_each_entry_safe(wf, tmp,
+				 &webos_fence_list_head, webos_fence_list) {
+		fence_put(&wf->base);
+	}
+
 	misc_deregister(&buf_man_dev);
 	debugfs_remove(webos_fence_debugfs);
-	printk("webos_buf_man end\n");
+	PRINT_DEBUG("webos_buf_man end\n");
 }
 
 module_init(buf_man_init);
